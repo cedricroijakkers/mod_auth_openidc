@@ -2520,7 +2520,7 @@ const command_rec oidc_config_cmds[] = {
 				"Client secret used in calls to OAuth 2.0 Authorization server validation calls."),
 
 		AP_INIT_TAKE1(OIDCOAuthIntrospectionEndpoint,
-				oidc_set_https_slot,
+				oidc_set_url_slot,
 				(void *)APR_OFFSETOF(oidc_cfg, oauth.introspection_endpoint_url),
 				RSRC_CONF,
 				"Define the OAuth AS Introspection Endpoint URL (e.g.: https://localhost:9031/as/token.oauth2)"),
@@ -2587,7 +2587,7 @@ const command_rec oidc_config_cmds[] = {
 				RSRC_CONF,
 				"Shared secret(s) that is/are used to verify signed JWT access tokens locally."),
 		AP_INIT_TAKE1(OIDCOAuthVerifyJwksUri,
-				oidc_set_https_slot,
+				oidc_set_url_slot,
 				(void *)APR_OFFSETOF(oidc_cfg, oauth.verify_jwks_uri),
 				RSRC_CONF,
 				"The JWKs URL on which the Authorization publishes the keys used to sign its JWT access tokens."),
