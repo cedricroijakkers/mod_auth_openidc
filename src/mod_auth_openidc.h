@@ -18,6 +18,7 @@
  */
 
 /***************************************************************************
+ * Copyright (C) 2017-2018 ZmartZone IAM
  * Copyright (C) 2013-2017 Ping Identity Corporation
  * All rights reserved.
  *
@@ -300,6 +301,7 @@ typedef struct oidc_oauth_t {
 	int ssl_validate_server;
 	char *client_id;
 	char *client_secret;
+	char *metadata_url;
 	char *introspection_endpoint_tls_client_key;
 	char *introspection_endpoint_tls_client_cert;
 	char *introspection_endpoint_url;
@@ -787,9 +789,11 @@ void oidc_util_hdr_err_out_add(const request_rec *r, const char *name, const cha
 // oidc_metadata.c
 apr_byte_t oidc_metadata_provider_retrieve(request_rec *r, oidc_cfg *cfg, const char *issuer, const char *url, json_t **j_metadata, char **response);
 apr_byte_t oidc_metadata_provider_parse(request_rec *r, oidc_cfg *cfg, json_t *j_provider, oidc_provider_t *provider);
+apr_byte_t oidc_metadata_provider_is_valid(request_rec *r, oidc_cfg *cfg, json_t *j_provider, const char *issuer);
 apr_byte_t oidc_metadata_list(request_rec *r, oidc_cfg *cfg, apr_array_header_t **arr);
 apr_byte_t oidc_metadata_get(request_rec *r, oidc_cfg *cfg, const char *selected, oidc_provider_t **provider, apr_byte_t allow_discovery);
 apr_byte_t oidc_metadata_jwks_get(request_rec *r, oidc_cfg *cfg, const oidc_jwks_uri_t *jwks_uri, json_t **j_jwks, apr_byte_t *refresh);
+apr_byte_t oidc_oauth_metadata_provider_parse(request_rec *r, oidc_cfg *c, json_t *j_provider);
 
 // oidc_session.c
 typedef struct {

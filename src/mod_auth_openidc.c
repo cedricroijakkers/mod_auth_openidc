@@ -18,6 +18,7 @@
  */
 
 /***************************************************************************
+ * Copyright (C) 2017-2018 ZmartZone IAM
  * Copyright (C) 2013-2017 Ping Identity Corporation
  * All rights reserved.
  *
@@ -316,8 +317,15 @@ static apr_byte_t oidc_provider_static_config(request_rec *r, oidc_cfg *c,
 
 	} else {
 
-		/* correct parsing and validation was already done when it was put in the cache */
 		oidc_util_decode_json_object(r, s_json, &j_provider);
+
+		/* check to see if it is valid metadata */
+		if (oidc_metadata_provider_is_valid(r, c, j_provider, NULL) == FALSE) {
+			oidc_error(r,
+					"cache corruption detected: invalid metadata from url: %s",
+					c->provider.metadata_url);
+			return FALSE;
+		}
 	}
 
 	*provider = apr_pcalloc(r->pool, sizeof(oidc_provider_t));
@@ -488,13 +496,21 @@ static int oidc_request_post_preserved_restore(request_rec *r,
 	const char *script =
 			apr_psprintf(r->pool,
 					"    <script type=\"text/javascript\">\n"
+					"      function str_decode(string) {\n"
+					"        try {\n"
+					"          result = decodeURIComponent(string);\n"
+					"        } catch (e) {\n"
+					"          result =  unescape(string);\n"
+					"        }\n"
+					"        return result;\n"
+					"      }\n"
 					"      function %s() {\n"
 					"        var mod_auth_openidc_preserve_post_params = JSON.parse(localStorage.getItem('mod_auth_openidc_preserve_post_params'));\n"
 					"		 localStorage.removeItem('mod_auth_openidc_preserve_post_params');\n"
 					"        for (var key in mod_auth_openidc_preserve_post_params) {\n"
 					"          var input = document.createElement(\"input\");\n"
-					"          input.name = decodeURIComponent(key);\n"
-					"          input.value = decodeURIComponent(mod_auth_openidc_preserve_post_params[key]);\n"
+					"          input.name = str_decode(key);\n"
+					"          input.value = str_decode(mod_auth_openidc_preserve_post_params[key]);\n"
 					"          input.type = \"hidden\";\n"
 					"          document.forms[0].appendChild(input);\n"
 					"        }\n"
@@ -1357,7 +1373,7 @@ static int oidc_handle_existing_session(request_rec *r, oidc_cfg *cfg,
 	oidc_debug(r, "enter");
 
 	/* set the user in the main request for further (incl. sub-request) processing */
-	r->user = (char *) session->remote_user;
+	r->user = apr_pstrdup(r->pool, session->remote_user);
 	oidc_debug(r, "set remote_user to \"%s\"", r->user);
 
 	/* get the header name in which the remote user name needs to be passed */
@@ -1611,7 +1627,7 @@ static apr_byte_t oidc_set_request_user(request_rec *r, oidc_cfg *c,
 		remote_user = apr_psprintf(r->pool, "%s%s%s", remote_user, OIDC_STR_AT,
 				issuer);
 
-	r->user = remote_user;
+	r->user = apr_pstrdup(r->pool, remote_user);
 
 	oidc_debug(r, "set remote_user to \"%s\" based on claim: \"%s\"%s", r->user,
 			c->remote_user_claim.claim_name,
@@ -1672,7 +1688,7 @@ static apr_byte_t oidc_save_in_session(request_rec *r, oidc_cfg *c,
 		oidc_debug(r,
 				"session management disabled: \"check_session_iframe\" is not set in provider configuration");
 	} else {
-		oidc_warn(r,
+		oidc_debug(r,
 				"session management disabled: no \"session_state\" value is provided in the authentication response even though \"check_session_iframe\" (%s) is set in the provider configuration",
 				provider->check_session_iframe);
 	}
@@ -2584,12 +2600,14 @@ static int oidc_handle_logout(request_rec *r, oidc_cfg *c,
 
 		}
 
-		if ((strstr(oidc_get_current_url_host(r), uri.hostname) == NULL)
-				|| (strstr(uri.hostname, oidc_get_current_url_host(r)) == NULL)) {
+		const char *c_host = oidc_get_current_url_host(r);
+		if ((uri.hostname != NULL)
+				&& ((strstr(c_host, uri.hostname) == NULL)
+						|| (strstr(uri.hostname, c_host) == NULL))) {
 			error_description =
 					apr_psprintf(r->pool,
 							"logout value \"%s\" does not match the hostname of the current request \"%s\"",
-							apr_uri_unparse(r->pool, &uri, 0), oidc_get_current_url_host(r));
+							apr_uri_unparse(r->pool, &uri, 0), c_host);
 			oidc_error(r, "%s", error_description);
 			return oidc_util_html_send_error(r, c->error_template,
 					"Invalid Request", error_description,
@@ -2618,8 +2636,7 @@ static int oidc_handle_logout(request_rec *r, oidc_cfg *c,
 		char *logout_request = apr_pstrdup(r->pool, end_session_endpoint);
 		if (id_token_hint != NULL) {
 			logout_request = apr_psprintf(r->pool, "%s%sid_token_hint=%s",
-					logout_request,
-					strchr(logout_request ? logout_request : "",
+					logout_request, strchr(logout_request ? logout_request : "",
 							OIDC_CHAR_QUERY) != NULL ?
 									OIDC_STR_AMP :
 									OIDC_STR_QUERY,
@@ -3001,7 +3018,7 @@ static int oidc_handle_info_request(request_rec *r, oidc_cfg *c,
 	}
 
 	/* set the user in the main request for further (incl. sub-request and authz) processing */
-	r->user = (char *) session->remote_user;
+	r->user = apr_pstrdup(r->pool, session->remote_user);
 
 	if (c->info_hook_data == NULL) {
 		oidc_warn(r, "no data configured to return in " OIDCInfoHook);
@@ -3218,7 +3235,7 @@ int oidc_handle_redirect_uri_request(request_rec *r, oidc_cfg *c,
 		//
 		//		/* send user facing error to browser */
 		//		return oidc_util_html_send_error(r, error, descr, DONE);
-		oidc_handle_redirect_authorization_response(r, c, session);
+		return oidc_handle_redirect_authorization_response(r, c, session);
 	}
 
 	oidc_error(r,
