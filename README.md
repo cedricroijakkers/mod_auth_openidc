@@ -1,5 +1,7 @@
 [![Build Status](https://travis-ci.org/zmartzone/mod_auth_openidc.svg?branch=master)](https://travis-ci.org/zmartzone/mod_auth_openidc)
 [<img width="184" height="96" align="right" src="http://openid.net/wordpress-content/uploads/2016/04/oid-l-certification-mark-l-rgb-150dpi-90mm@2x.png" alt="OpenID Certification">](https://openid.net/certification)
+[![Code Quality: Cpp](https://img.shields.io/lgtm/grade/cpp/g/zmartzone/mod_auth_openidc.svg?logo=lgtm&logoWidth=18)](https://lgtm.com/projects/g/zmartzone/mod_auth_openidc/context:cpp)
+[![Total Alerts](https://img.shields.io/lgtm/alerts/g/zmartzone/mod_auth_openidc.svg?logo=lgtm&logoWidth=18)](https://lgtm.com/projects/g/zmartzone/mod_auth_openidc/alerts)
 
 mod_auth_openidc
 ================
@@ -86,6 +88,7 @@ OIDCProviderMetadataURL https://accounts.google.com/.well-known/openid-configura
 OIDCClientID <your-client-id-administered-through-the-google-api-console>
 OIDCClientSecret <your-client-secret-administered-through-the-google-api-console>
 
+# OIDCRedirectURI is a vanity URL that must point to a path protected by this module but must NOT point to any content
 OIDCRedirectURI https://www.example.com/example/redirect_uri
 OIDCCryptoPassphrase <password>
 
@@ -114,6 +117,7 @@ See also the [Wiki page on Keycloak](https://github.com/zmartzone/mod_auth_openi
 
 ```apache
 OIDCProviderMetadataURL https://keycloak.example.net/auth/realms/master/.well-known/openid-configuration
+# OIDCRedirectURI is a vanity URL that must point to a path protected by this module but must NOT point to any content
 OIDCRedirectURI https://www.example.net/oauth2callback
 OIDCCryptoPassphrase random1234
 OIDCClientID <your-client-id-registered-in-keycloak>
@@ -144,6 +148,7 @@ OIDCProviderMetadataURL <issuer>/.well-known/openid-configuration
 OIDCClientID <client_id>
 OIDCClientSecret <client_secret>
 
+# OIDCRedirectURI is a vanity URL that must point to a path protected by this module but must NOT point to any content
 OIDCRedirectURI https://<hostname>/secure/redirect_uri
 OIDCCryptoPassphrase <password>
 
