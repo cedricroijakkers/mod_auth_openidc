@@ -18,7 +18,7 @@
  */
 
 /***************************************************************************
- * Copyright (C) 2017-2018 ZmartZone IAM
+ * Copyright (C) 2017-2019 ZmartZone IAM
  * Copyright (C) 2013-2017 Ping Identity Corporation
  * All rights reserved.
  *
@@ -90,8 +90,8 @@ void _oidc_jose_error_set(oidc_jose_error_t *, const char *, const int,
 		const char *, const char *msg, ...);
 #define oidc_jose_error(err, msg, ...) _oidc_jose_error_set(err, __FILE__, __LINE__, __FUNCTION__, msg, ##__VA_ARGS__)
 #define oidc_jose_error_openssl(err, msg, ...) _oidc_jose_error_set(err, __FILE__, __LINE__, __FUNCTION__, "%s() failed: %s", msg, ERR_error_string(ERR_get_error(), NULL), ##__VA_ARGS__)
-#define oidc_jose_e2s(pool, err) apr_psprintf(pool, "[%s:%d: %s]: %s\n", err.source, err.line, err.function, err.text)
-#define oidc_cjose_e2s(pool, cjose_err) apr_psprintf(pool, "%s [file: %s, function: %s, line: %ld]\n", cjose_err.message, cjose_err.file, cjose_err.function, cjose_err.line)
+#define oidc_jose_e2s(pool, err) apr_psprintf(pool, "[%s:%d: %s]: %s", err.source, err.line, err.function, err.text)
+#define oidc_cjose_e2s(pool, cjose_err) apr_psprintf(pool, "%s [file: %s, function: %s, line: %ld]", cjose_err.message, cjose_err.file, cjose_err.function, cjose_err.line)
 
 /*
  * helper functions
@@ -117,6 +117,9 @@ apr_byte_t oidc_jose_hash_bytes(apr_pool_t *pool, const char *s_digest,
 		const unsigned char *input, unsigned int input_len,
 		unsigned char **output, unsigned int *output_len,
 		oidc_jose_error_t *err);
+apr_byte_t oidc_jose_hash_and_base64url_encode(apr_pool_t *pool,
+		const char *openssl_hash_algo, const char *input, int input_len,
+		char **output);
 
 /* return a string claim value from a JSON object */
 apr_byte_t oidc_jose_get_string(apr_pool_t *pool, json_t *json,

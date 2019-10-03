@@ -18,7 +18,7 @@
  */
 
 /***************************************************************************
- * Copyright (C) 2017-2018 ZmartZone IAM
+ * Copyright (C) 2017-2019 ZmartZone IAM
  * Copyright (C) 2013-2017 Ping Identity Corporation
  * All rights reserved.
  *
@@ -493,10 +493,27 @@ static const char *oidc_get_current_url_base(request_rec *r) {
  * get the URL that is currently being accessed
  */
 char *oidc_get_current_url(request_rec *r) {
+	char *url = NULL, *path = NULL;
+	apr_uri_t uri;
 
-	char *url = apr_pstrcat(r->pool, oidc_get_current_url_base(r), r->uri,
-			(r->args != NULL && *r->args != '\0' ? "?" : ""), r->args,
-			NULL);
+	path = r->uri;
+
+	/* check if we're dealing with a forward proxying secenario i.e. a non-relative URL */
+	if ((path) && (path[0] != '/')) {
+		memset(&uri, 0, sizeof(apr_uri_t));
+		if (apr_uri_parse(r->pool, r->uri, &uri) == APR_SUCCESS)
+			path = apr_pstrcat(r->pool, uri.path,
+					(r->args != NULL && *r->args != '\0' ? "?" : ""), r->args,
+					NULL);
+		else
+			oidc_warn(r, "apr_uri_parse failed on non-relative URL: %s",
+					r->uri);
+	} else {
+		/* make sure we retain URL-encoded characters original URL that we send the user back to */
+		path = r->unparsed_uri;
+	}
+
+	url = apr_pstrcat(r->pool, oidc_get_current_url_base(r), path, NULL);
 
 	oidc_debug(r, "current URL '%s'", url);
 
@@ -635,7 +652,7 @@ char *oidc_util_http_query_encoded_url(request_rec *r, const char *url,
 /*
  * construct form-encoded POST data
  */
-static char *oidc_util_http_form_encoded_data(request_rec *r,
+char *oidc_util_http_form_encoded_data(request_rec *r,
 		const apr_table_t *params) {
 	char *data = NULL;
 	if ((params != NULL) && (apr_table_elts(params)->nelts > 0)) {
@@ -1318,6 +1335,15 @@ int oidc_util_http_send(request_rec *r, const char *data, size_t data_len,
 		return HTTP_INTERNAL_SERVER_ERROR;
 	}
 	//r->status = success_rvalue;
+
+	if ((success_rvalue == OK) && (r->user == NULL)) {
+		/*
+		 * satisfy Apache 2.4 mod_authz_core:
+		 * prevent it to return HTTP 500 after sending content
+		 */
+		r->user = "";
+	}
+
 	return success_rvalue;
 }
 
@@ -1474,19 +1500,55 @@ apr_byte_t oidc_util_read_form_encoded_params(request_rec *r,
 	return TRUE;
 }
 
+static void oidc_userdata_set_post_param(request_rec *r,
+		const char *post_param_name, const char *post_param_value) {
+	apr_table_t *userdata_post_params = NULL;
+	apr_pool_userdata_get((void **) &userdata_post_params,
+			OIDC_USERDATA_POST_PARAMS_KEY, r->pool);
+	if (userdata_post_params == NULL)
+		userdata_post_params = apr_table_make(r->pool, 1);
+	apr_table_set(userdata_post_params, post_param_name, post_param_value);
+	apr_pool_userdata_set(userdata_post_params, OIDC_USERDATA_POST_PARAMS_KEY,
+			NULL, r->pool);
+
+}
+
 /*
  * read the POST parameters in to a table
  */
-apr_byte_t oidc_util_read_post_params(request_rec *r, apr_table_t *table) {
+apr_byte_t oidc_util_read_post_params(request_rec *r, apr_table_t *table,
+		apr_byte_t propagate, const char *strip_param_name) {
+	apr_byte_t rc = FALSE;
 	char *data = NULL;
+	const apr_array_header_t *arr = NULL;
+	const apr_table_entry_t *elts = NULL;
+	int i = 0;
+	const char *content_type = NULL;
 
-	if (r->method_number != M_POST)
-		return FALSE;
+	content_type = oidc_util_hdr_in_content_type_get(r);
+	if ((r->method_number != M_POST) || (apr_strnatcmp(content_type,
+			OIDC_CONTENT_TYPE_FORM_ENCODED) != 0))
+		goto end;
 
 	if (oidc_util_read(r, &data) != TRUE)
-		return FALSE;
+		goto end;
 
-	return oidc_util_read_form_encoded_params(r, table, data);
+	rc = oidc_util_read_form_encoded_params(r, table, data);
+	if (rc != TRUE)
+		goto end;
+
+	if (propagate == FALSE)
+		goto end;
+
+	arr = apr_table_elts(table);
+	elts = (const apr_table_entry_t*) arr->elts;
+	for (i = 0; i < arr->nelts; i++)
+		if (apr_strnatcmp(elts[i].key, strip_param_name) != 0)
+			oidc_userdata_set_post_param(r, elts[i].key, elts[i].val);
+
+	end:
+
+	return rc;
 }
 
 /*
@@ -1676,8 +1738,6 @@ void oidc_util_set_app_info(request_rec *r, const char *s_key,
 		const char *s_value, const char *claim_prefix, apr_byte_t as_header,
 		apr_byte_t as_env_var) {
 
-	apr_table_t *env = NULL;
-
 	/* construct the header name, cq. put the prefix in front of a normalized key name */
 	const char *s_name = apr_psprintf(r->pool, "%s%s", claim_prefix,
 			oidc_normalize_header_name(r, s_key));
@@ -1691,11 +1751,7 @@ void oidc_util_set_app_info(request_rec *r, const char *s_key,
 		oidc_debug(r, "setting environment variable \"%s: %s\"", s_name,
 				s_value);
 
-		apr_pool_userdata_get((void **) &env, OIDC_USERDATA_ENV_KEY, r->pool);
-		if (env == NULL)
-			env = apr_table_make(r->pool, 10);
-		apr_table_set(env, s_name, s_value);
-		apr_pool_userdata_set(env, OIDC_USERDATA_ENV_KEY, NULL, r->pool);
+		apr_table_set(r->subprocess_env, s_name, s_value);
 	}
 }
 
@@ -2315,11 +2371,15 @@ const char *oidc_util_hdr_in_user_agent_get(const request_rec *r) {
 
 const char *oidc_util_hdr_in_x_forwarded_for_get(const request_rec *r) {
 	return oidc_util_hdr_in_get_left_most_only(r, OIDC_HTTP_HDR_X_FORWARDED_FOR,
-			OIDC_STR_COMMA);
+			OIDC_STR_COMMA OIDC_STR_SPACE);
 }
 
 const char *oidc_util_hdr_in_content_type_get(const request_rec *r) {
 	return oidc_util_hdr_in_get(r, OIDC_HTTP_HDR_CONTENT_TYPE);
+}
+
+const char *oidc_util_hdr_in_content_length_get(const request_rec *r) {
+	return oidc_util_hdr_in_get(r, OIDC_HTTP_HDR_CONTENT_LENGTH);
 }
 
 const char *oidc_util_hdr_in_x_requested_with_get(const request_rec *r) {
@@ -2342,17 +2402,17 @@ const char *oidc_util_hdr_in_authorization_get(const request_rec *r) {
 
 const char *oidc_util_hdr_in_x_forwarded_proto_get(const request_rec *r) {
 	return oidc_util_hdr_in_get_left_most_only(r,
-			OIDC_HTTP_HDR_X_FORWARDED_PROTO, OIDC_STR_COMMA);
+			OIDC_HTTP_HDR_X_FORWARDED_PROTO, OIDC_STR_COMMA OIDC_STR_SPACE);
 }
 
 const char *oidc_util_hdr_in_x_forwarded_port_get(const request_rec *r) {
 	return oidc_util_hdr_in_get_left_most_only(r,
-			OIDC_HTTP_HDR_X_FORWARDED_PORT, OIDC_STR_COMMA);
+			OIDC_HTTP_HDR_X_FORWARDED_PORT, OIDC_STR_COMMA OIDC_STR_SPACE);
 }
 
 const char *oidc_util_hdr_in_x_forwarded_host_get(const request_rec *r) {
 	return oidc_util_hdr_in_get_left_most_only(r,
-			OIDC_HTTP_HDR_X_FORWARDED_HOST, OIDC_STR_COMMA);
+			OIDC_HTTP_HDR_X_FORWARDED_HOST, OIDC_STR_COMMA OIDC_STR_SPACE);
 }
 
 const char *oidc_util_hdr_in_host_get(const request_rec *r) {
@@ -2373,3 +2433,169 @@ const char *oidc_util_get_provided_token_binding_id(const request_rec *r) {
 		result = apr_table_get(r->subprocess_env, OIDC_TB_CFG_PROVIDED_ENV_VAR);
 	return result;
 }
+
+const char *oidc_util_get_client_cert_fingerprint(request_rec *r) {
+	const char *fingerprint = NULL;
+
+	if (r->subprocess_env == NULL)
+		goto end;
+
+	fingerprint = apr_table_get(r->subprocess_env,
+			OIDC_TB_CFG_FINGERPRINT_ENV_VAR);
+	if (fingerprint == NULL) {
+		oidc_debug(r, "no %s environment variable found",
+				OIDC_TB_CFG_FINGERPRINT_ENV_VAR);
+		goto end;
+	}
+
+end:
+
+	return fingerprint;
+}
+
+apr_byte_t oidc_util_json_validate_cnf_tbh(request_rec *r,
+		int token_binding_policy, const char *tbh_str) {
+	const char *tbp_str = NULL;
+	char *tbp = NULL;
+	int tbp_len = -1;
+	unsigned char *tbp_hash = NULL;
+	unsigned int tbp_hash_len = -1;
+	char *tbh = NULL;
+	int tbh_len = -1;
+
+	tbp_str = oidc_util_get_provided_token_binding_id(r);
+	if (tbp_str == NULL) {
+		oidc_debug(r,
+				"no Provided Token Binding ID environment variable found");
+		goto out_err;
+	}
+
+	tbp_len = oidc_base64url_decode(r->pool, &tbp, tbp_str);
+	if (tbp_len <= 0) {
+		oidc_warn(r,
+				"Provided Token Binding ID environment variable could not be decoded");
+		goto out_err;
+	}
+
+	if (oidc_jose_hash_bytes(r->pool, OIDC_JOSE_ALG_SHA256,
+			(const unsigned char *) tbp, tbp_len, &tbp_hash, &tbp_hash_len,
+			NULL) == FALSE) {
+		oidc_warn(r,
+				"hashing Provided Token Binding ID environment variable failed");
+		goto out_err;
+	}
+
+	tbh_len = oidc_base64url_decode(r->pool, &tbh, tbh_str);
+	if (tbh_len <= 0) {
+		oidc_warn(r, "cnf[\"tbh\"] provided but it could not be decoded");
+		goto out_err;
+	}
+
+	if (tbp_hash_len != tbh_len) {
+		oidc_warn(r,
+				"hash length of provided token binding ID environment variable: %d does not match length of cnf[\"tbh\"]: %d",
+				tbp_hash_len, tbh_len);
+		goto out_err;
+	}
+
+	if (memcmp(tbp_hash, tbh, tbh_len) != 0) {
+		oidc_warn(r,
+				"hash of provided token binding ID environment variable does not match cnf[\"tbh\"]");
+		goto out_err;
+	}
+
+	oidc_debug(r,
+			"hash of provided token binding ID environment variable matches cnf[\"tbh\"]");
+
+	return TRUE;
+
+out_err:
+
+	if (token_binding_policy == OIDC_TOKEN_BINDING_POLICY_OPTIONAL)
+		return TRUE;
+	if (token_binding_policy == OIDC_TOKEN_BINDING_POLICY_ENFORCED)
+		return FALSE;
+
+	// token_binding_policy == OIDC_TOKEN_BINDING_POLICY_REQURIED
+	return (tbp_str == NULL);
+}
+
+apr_byte_t oidc_util_json_validate_cnf_x5t_s256(request_rec *r,
+		int token_binding_policy, const char *x5t_256_str) {
+	const char *fingerprint = NULL;
+
+	fingerprint = oidc_util_get_client_cert_fingerprint(r);
+	if (fingerprint == NULL) {
+		oidc_debug(r, "no certificate (fingerprint) provided");
+		goto out_err;
+	}
+
+	if (apr_strnatcmp(fingerprint, x5t_256_str) != 0) {
+		oidc_warn(r,
+				"fingerprint of provided cert (%s) does not match cnf[\"x5t#S256\"] (%s)",
+				fingerprint, x5t_256_str);
+		goto out_err;
+	}
+
+	oidc_debug(r, "fingerprint of provided cert (%s) matches cnf[\"x5t#S256\"]",
+			fingerprint);
+
+	return TRUE;
+
+	out_err:
+
+	if (token_binding_policy == OIDC_TOKEN_BINDING_POLICY_OPTIONAL)
+		return TRUE;
+	if (token_binding_policy == OIDC_TOKEN_BINDING_POLICY_ENFORCED)
+		return FALSE;
+
+	// token_binding_policy == OIDC_TOKEN_BINDING_POLICY_REQURIED
+	return (fingerprint == NULL);
+}
+
+/*
+ * validate the "cnf" claim in a JWT payload
+ */
+apr_byte_t oidc_util_json_validate_cnf(request_rec *r, json_t *jwt,
+		int token_binding_policy) {
+	char *tbh_str = NULL;
+
+	oidc_debug(r, "enter: policy=%s",
+			oidc_token_binding_policy2str(r->pool, token_binding_policy));
+
+	if (token_binding_policy == OIDC_TOKEN_BINDING_POLICY_DISABLED)
+		return TRUE;
+
+	json_t *cnf = json_object_get(jwt, OIDC_CLAIM_CNF);
+	if (cnf == NULL) {
+		oidc_debug(r, "no \"%s\" claim found in the token", OIDC_CLAIM_CNF);
+		goto out_err;
+	}
+
+	oidc_jose_get_string(r->pool, cnf, OIDC_CLAIM_CNF_TBH, FALSE, &tbh_str,
+			NULL);
+	if (tbh_str != NULL)
+		return oidc_util_json_validate_cnf_tbh(r, token_binding_policy, tbh_str);
+
+	oidc_jose_get_string(r->pool, cnf, OIDC_CLAIM_CNF_X5T_S256, FALSE, &tbh_str,
+			NULL);
+	if (tbh_str != NULL)
+		return oidc_util_json_validate_cnf_x5t_s256(r, token_binding_policy,
+				tbh_str);
+
+	oidc_debug(r,
+			" \"%s\" claim found in the token but no \"%s\" or \"%s\" key found inside",
+			OIDC_CLAIM_CNF, OIDC_CLAIM_CNF_TBH, OIDC_CLAIM_CNF_X5T_S256);
+
+out_err:
+
+	if (token_binding_policy == OIDC_TOKEN_BINDING_POLICY_OPTIONAL)
+		return TRUE;
+	if (token_binding_policy == OIDC_TOKEN_BINDING_POLICY_ENFORCED)
+		return FALSE;
+
+	// token_binding_policy == OIDC_TOKEN_BINDING_POLICY_REQUIRED
+	// TODO: we don't know which token binding the client supports, do we ?
+	return FALSE;
+}
+

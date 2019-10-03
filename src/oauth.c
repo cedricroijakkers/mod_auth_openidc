@@ -18,7 +18,7 @@
  */
 
 /***************************************************************************
- * Copyright (C) 2017-2018 ZmartZone IAM
+ * Copyright (C) 2017-2019 ZmartZone IAM
  * Copyright (C) 2013-2017 Ping Identity Corporation
  * All rights reserved.
  *
@@ -107,7 +107,7 @@ static apr_byte_t oidc_oauth_provider_config(request_rec *r, oidc_cfg *c) {
 			return FALSE;
 		}
 
-		oidc_cache_set_provider(r, c->oauth.metadata_url, s_json,
+		oidc_cache_set_oauth_provider(r, c->oauth.metadata_url, s_json,
 				apr_time_now() + (c->provider_metadata_refresh_interval <= 0 ? apr_time_from_sec( OIDC_CACHE_PROVIDER_METADATA_EXPIRY_DEFAULT) : c->provider_metadata_refresh_interval));
 
 	} else {
@@ -168,8 +168,9 @@ static apr_byte_t oidc_oauth_validate_access_token(request_rec *r, oidc_cfg *c,
 	/* add the token endpoint authentication credentials */
 	if (oidc_proto_token_endpoint_auth(r, c,
 			c->oauth.introspection_endpoint_auth, c->oauth.client_id,
-			c->oauth.client_secret, c->oauth.introspection_endpoint_url, params,
-			bearer_access_token_auth, &basic_auth, &bearer_auth) == FALSE)
+			c->oauth.client_secret, NULL, c->oauth.introspection_endpoint_url,
+			params, bearer_access_token_auth, &basic_auth,
+			&bearer_auth) == FALSE)
 		return FALSE;
 
 	/* call the endpoint with the constructed parameter set and return the resulting response */
@@ -263,7 +264,8 @@ apr_byte_t oidc_oauth_get_bearer_token(request_rec *r,
 	if ((*access_token == NULL) && (r->method_number == M_POST)
 			&& (accept_token_in & OIDC_OAUTH_ACCEPT_TOKEN_IN_POST)) {
 		apr_table_t *params = apr_table_make(r->pool, 8);
-		if (oidc_util_read_post_params(r, params) == TRUE) {
+		if (oidc_util_read_post_params(r, params, TRUE,
+				OIDC_PROTO_ACCESS_TOKEN) == TRUE) {
 			*access_token = apr_table_get(params, OIDC_PROTO_ACCESS_TOKEN);
 		}
 	}
@@ -480,6 +482,11 @@ static apr_byte_t oidc_oauth_resolve_access_token(request_rec *r, oidc_cfg *c,
 		if (oidc_util_decode_json_and_check_error(r, s_json, &result) == FALSE)
 			return FALSE;
 
+		/* check the token binding ID in the introspection result */
+		if (oidc_util_json_validate_cnf(r, result,
+				c->oauth.access_token_binding_policy) == FALSE)
+			return FALSE;
+
 		json_t *active = json_object_get(result, OIDC_PROTO_ACTIVE);
 		apr_time_t cache_until;
 		if (active != NULL) {
@@ -580,7 +587,7 @@ static apr_byte_t oidc_oauth_resolve_access_token(request_rec *r, oidc_cfg *c,
  *
  * TODO: document that we're reusing the following settings from the OIDC config section:
  *       - JWKs URI refresh interval
- *       - encryption key material (OIDCPrivateKeyFiles)
+ *       - decryption key material (OIDCPrivateKeyFiles)
  *
  * OIDCOAuthRemoteUserClaim client_id
  * # 32x 61 hex
@@ -594,6 +601,8 @@ static apr_byte_t oidc_oauth_validate_jwt_access_token(request_rec *r,
 
 	oidc_jose_error_t err;
 	oidc_jwk_t *jwk = NULL;
+
+	// TODO: replace this OIDC client secret with OIDCOAuthDecryptSharedKeys
 	if (oidc_util_create_symmetric_key(r, c->provider.client_secret, 0, NULL,
 			TRUE, &jwk) == FALSE)
 		return FALSE;
@@ -615,7 +624,8 @@ static apr_byte_t oidc_oauth_validate_jwt_access_token(request_rec *r,
 	 * validate the access token JWT by validating the (optional) exp claim
 	 * don't enforce anything around iat since it doesn't make much sense for access tokens
 	 */
-	if (oidc_proto_validate_jwt(r, jwt, NULL, FALSE, FALSE, -1) == FALSE) {
+	if (oidc_proto_validate_jwt(r, jwt, NULL, FALSE, FALSE, -1,
+			c->oauth.access_token_binding_policy) == FALSE) {
 		oidc_jwt_destroy(jwt);
 		return FALSE;
 	}
@@ -705,7 +715,8 @@ static apr_byte_t oidc_oauth_set_request_user(request_rec *r, oidc_cfg *c,
 /*
  * main routine: handle OAuth 2.0 authentication/authorization
  */
-int oidc_oauth_check_userid(request_rec *r, oidc_cfg *c, const char *access_token) {
+int oidc_oauth_check_userid(request_rec *r, oidc_cfg *c,
+		const char *access_token) {
 
 	/* check if this is a sub-request or an initial request */
 	if (!ap_is_initial_req(r)) {
@@ -728,16 +739,22 @@ int oidc_oauth_check_userid(request_rec *r, oidc_cfg *c, const char *access_toke
 			return OK;
 		}
 
-		/* check if this is a request for the public (encryption) keys */
+		/* check if this is a request to the "special" handler (Redirect URI) */
 	} else if (oidc_util_request_matches_url(r, oidc_get_redirect_uri(r, c))) {
 
+		/* check if this is a request for the public (encryption) keys */
 		if (oidc_util_request_has_parameter(r,
 				OIDC_REDIRECT_URI_REQUEST_JWKS)) {
 
 			return oidc_handle_jwks(r, c);
 
-		}
+			/* check if this is a request to remove the access token from the cache */
+		} else if (oidc_util_request_has_parameter(r,
+				OIDC_REDIRECT_URI_REQUEST_REMOVE_AT_CACHE)) {
 
+			/* handle request to invalidate access token cache */
+			return oidc_handle_remove_at_cache(r, c);
+		}
 	}
 
 	/* we don't have a session yet */
@@ -753,7 +770,8 @@ int oidc_oauth_check_userid(request_rec *r, oidc_cfg *c, const char *access_toke
 				return OK;
 			}
 			return oidc_oauth_return_www_authenticate(r,
-					OIDC_PROTO_ERR_INVALID_REQUEST, "No bearer token found in the request");
+					OIDC_PROTO_ERR_INVALID_REQUEST,
+					"No bearer token found in the request");
 		}
 	}
 
